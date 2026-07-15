@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "394118045926",
+    "project_id": "chess-warriors",
+    "storage_bucket": "chess-warriors.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:394118045926:android:5d2305def6f3928af0db27",
+        "android_client_info": {
+          "package_name": "com.weavy.chess_warriors"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCvmwDrWg9SRXPT35PP251uY7V4yZiaXpc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
