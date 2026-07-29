@@ -113,12 +113,19 @@ class ChessEngine {
     // Sort moves by value descending
     moveValues.sort((a, b) => b.value.compareTo(a.value));
 
-    // For Advanced (depth >= 4), always take the best move
-    // For others, add some randomness
-    if (depth >= 4) {
+    // For Advanced (depth >= 5), always take the best move
+    // For others, add some randomness but keep it intelligent
+    if (depth >= 5) {
+      return moveValues[0].key;
+    } else if (depth == 4) {
+      // Medium: 80% chance for best move, 20% for second best
+      if (moveValues.length > 1 && Random().nextDouble() < 0.2) {
+        return moveValues[1].key;
+      }
       return moveValues[0].key;
     } else {
-      int count = min(depth == 3 ? 2 : 3, moveValues.length);
+      // Easy: Professional but can make slight mistakes
+      int count = min(2, moveValues.length);
       int randomIndex = Random().nextInt(count);
       return moveValues[randomIndex].key;
     }
@@ -163,37 +170,51 @@ class ChessEngine {
 
   static int _scoreMove(chess.Chess game, chess.Move move) {
     int score = 0;
-    // Heuristic: Prefer captures
-    if (game.get(getSquareName(move.to)) != null) {
-      score += 1000;
-      // Bonus for capturing high value piece with low value piece
-      final victim = game.get(getSquareName(move.to));
-      final attacker = game.get(getSquareName(move.from));
-      if (victim != null && attacker != null) {
-        score += (pieceValues[victim.type.toString().split('.').last.toLowerCase()] ?? 0) -
-                 (pieceValues[attacker.type.toString().split('.').last.toLowerCase()] ?? 0) ~/ 10;
-      }
+    
+    final targetPiece = game.get(getSquareName(move.to));
+    final attackerPiece = game.get(getSquareName(move.from));
+
+    // Heuristic: Prefer captures (Cutting down coins)
+    if (targetPiece != null) {
+      score += 2000; // Increased base capture bonus
+      
+      // MVV-LVA: Most Valuable Victim - Least Valuable Attacker
+      int victimValue = pieceValues[targetPiece.type.toString().split('.').last.toLowerCase()] ?? 0;
+      int attackerValue = pieceValues[attackerPiece?.type.toString().split('.').last.toLowerCase()] ?? 0;
+      score += victimValue - (attackerValue ~/ 10);
     }
+
+    // Give bonus for putting opponent in check
+    game.make_move(move);
+    if (game.in_check) {
+      score += 500;
+    }
+    game.undo_move();
+
     // Heuristic: Prefer promotions
     if (move.promotion != null) {
-      score += 800;
+      score += 1500;
     }
+
     return score;
   }
 
   static int evaluateBoard(chess.Chess game) {
     if (game.in_checkmate) {
-      // Return a very high value if the current player is in checkmate
-      // Since it's called after a move, if turn is WHITE, WHITE was just checkmated.
-      return game.turn == chess.Color.WHITE ? -999999 : 999999;
+      return game.turn == chess.Color.WHITE ? -1000000 : 1000000;
     }
     if (game.in_draw) return 0;
 
     int totalEvaluation = 0;
-    for (int i = 0; i < 8; i++) {
-      for (int j = 0; j < 8; j++) {
-        int square = (i << 4) | j;
-        totalEvaluation += getPieceValue(game.get(getSquareName(square)), i, j);
+    // Using 0x88 board representation for faster access
+    for (int i = 0; i < 128; i++) {
+      if ((i & 0x88) == 0) {
+        final piece = game.board[i];
+        if (piece != null) {
+          int row = i >> 4;
+          int col = i & 7;
+          totalEvaluation += getPieceValue(piece, row, col);
+        }
       }
     }
     return totalEvaluation;

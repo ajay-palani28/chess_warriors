@@ -1,67 +1,199 @@
-import 'package:firebase_database/firebase_database.dart';
+import 'dart:async';
+import 'dart:convert';
 import 'package:chess/chess.dart' as chess_pkg;
 import 'package:flutter/foundation.dart';
+import 'services/user_service.dart';
+import 'network/api_client.dart';
 
 class MultiplayerService {
-  DatabaseReference get _database => FirebaseDatabase.instance.ref();
-  String? _gameId;
+  final ApiClient _apiClient = ApiClient();
+  String? _matchId;
   chess_pkg.Color? _playerColor;
+  Timer? _pollingTimer;
+  bool _isPolling = false;
+  DateTime? _lastMoveTime;
 
-  String? get gameId => _gameId;
+  String? get matchId => _matchId;
   chess_pkg.Color? get playerColor => _playerColor;
 
+  final _gameController = StreamController<Map<String, dynamic>>.broadcast();
+
+  Stream<Map<String, dynamic>> listenToGame() => _gameController.stream;
+
   Future<String> createGame() async {
-    final gameRef = _database.child('games').push();
-    _gameId = gameRef.key;
-    _playerColor = chess_pkg.Color.WHITE;
+    final response = await _apiClient.post(
+      '/match/create',
+      headers: {'Authorization': 'Bearer ${UserService().token}'},
+    );
 
-    await gameRef.set({
-      'fen': 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
-      'turn': 'w',
-      'whiteJoined': true,
-      'blackJoined': false,
-      'lastMove': '',
-    });
-
-    return _gameId!;
+    final data = jsonDecode(response.body);
+    if (data['status'] == true) {
+      _matchId = data['data']['id'];
+      _playerColor = chess_pkg.Color.WHITE;
+      _gameController.add(data['data']); // Send initial state
+      _startPolling();
+      return data['data']['matchCode'];
+    }
+    throw Exception(data['message'] ?? 'Failed to create game');
   }
 
-  Future<bool> joinGame(String gameId) async {
-    final gameRef = _database.child('games').child(gameId);
-    final snapshot = await gameRef.get();
+  Future<bool> joinGame(String matchCode) async {
+    final response = await _apiClient.post(
+      '/match/join/$matchCode',
+      headers: {'Authorization': 'Bearer ${UserService().token}'},
+    );
 
-    if (snapshot.exists) {
-      final data = snapshot.value as Map;
-      if (data['blackJoined'] == false) {
-        _gameId = gameId;
-        _playerColor = chess_pkg.Color.BLACK;
-        await gameRef.update({'blackJoined': true});
-        return true;
-      }
+    final data = jsonDecode(response.body);
+    if (data['status'] == true) {
+      _matchId = data['data']['id'];
+      _playerColor = chess_pkg.Color.BLACK;
+      _gameController.add(data['data']); // Send initial state
+      _startPolling();
+      return true;
     }
     return false;
   }
 
-  Stream<DatabaseEvent> listenToGame() {
-    if (_gameId == null) throw Exception("Game ID not set");
-    return _database.child('games').child(_gameId!).onValue;
-  }
+  Future<void> findRandomGame() async {
+    final response = await _apiClient.post(
+      '/match/random',
+      headers: {'Authorization': 'Bearer ${UserService().token}'},
+    );
 
-  Future<void> makeMove(String fen, String lastMove, chess_pkg.Color nextTurn) async {
-    try {
-      if (_gameId == null) return;
-      await _database.child('games').child(_gameId!).update({
-        'fen': fen,
-        'lastMove': lastMove,
-        'turn': nextTurn == chess_pkg.Color.WHITE ? 'w' : 'b',
-      });
-    } catch (e) {
-      debugPrint("Error making multiplayer move: $e");
+    final data = jsonDecode(response.body);
+    debugPrint("Random match response: $data");
+    
+    if (data['status'] == true) {
+      _matchId = data['data']['id'];
+      
+      // Use the yourColor field from backend if available
+      final String? yourColorStr = data['data']['yourColor'];
+      if (yourColorStr != null) {
+        _playerColor = yourColorStr == 'white' ? chess_pkg.Color.WHITE : chess_pkg.Color.BLACK;
+      } else {
+        // Fallback to ID check if yourColor is missing
+        final String currentUserId = UserService().userId ?? "";
+        final dynamic p2 = data['data']['player2'];
+        final String? p2Id = (p2 is Map) ? p2['id']?.toString() : data['data']['player2Id']?.toString();
+        
+        if (p2Id == currentUserId) {
+          _playerColor = chess_pkg.Color.BLACK;
+        } else {
+          _playerColor = chess_pkg.Color.WHITE;
+        }
+      }
+      
+      debugPrint("Assigned color: $_playerColor for userId: ${UserService().userId}");
+      _gameController.add(data['data']); // Send initial state
+      _startPolling();
+    } else {
+      throw Exception(data['message'] ?? 'Failed to find random match');
     }
   }
 
-  void leaveGame() {
-    _gameId = null;
+  void _startPolling() {
+    _pollingTimer?.cancel();
+    _pollingTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
+      if (!_isPolling) {
+        _fetchMatchState();
+      }
+    });
+  }
+
+  Future<void> _fetchMatchState() async {
+    if (_matchId == null || _isPolling) return;
+    
+    // If we just made a move, wait a bit for the server to sync before polling
+    if (_lastMoveTime != null && 
+        DateTime.now().difference(_lastMoveTime!).inMilliseconds < 1500) {
+      return;
+    }
+
+    _isPolling = true;
+    try {
+      final response = await _apiClient.get(
+        '/match/$_matchId',
+        headers: {'Authorization': 'Bearer ${UserService().token}'},
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data['status'] == true) {
+          // Double check matchId hasn't changed during request
+          if (_matchId == data['data']['id']) {
+            // If we just made a move, ignore poll results that might be stale
+            if (_lastMoveTime != null && 
+                DateTime.now().difference(_lastMoveTime!).inMilliseconds < 1500) {
+              return;
+            }
+
+            _gameController.add(data['data']);
+            
+            // Stop polling if match is completed
+            if (data['data']['status'] == 'completed') {
+              _pollingTimer?.cancel();
+            }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint("Error polling match state: $e");
+    } finally {
+      _isPolling = false;
+    }
+  }
+
+  Future<void> makeMove({
+    required String fen,
+    String? moveSan,
+    String? from,
+    String? to,
+    String? promotion,
+  }) async {
+    if (_matchId == null) return;
+    _lastMoveTime = DateTime.now();
+
+    try {
+      final body = <String, String>{};
+      if (moveSan != null) {
+        body['move'] = moveSan;
+      } else if (from != null && to != null) {
+        body['from'] = from;
+        body['to'] = to;
+        if (promotion != null) body['promotion'] = promotion;
+      }
+
+      final response = await _apiClient.post(
+        '/match/$_matchId/move',
+        headers: {'Authorization': 'Bearer ${UserService().token}'},
+        body: body,
+      );
+
+      final data = jsonDecode(response.body);
+      if (data['status'] == true) {
+        _gameController.add(data['data']);
+      } else {
+        debugPrint("Move failed: ${data['message']}");
+      }
+    } catch (e) {
+      debugPrint("Error making move: $e");
+    }
+  }
+
+  Future<void> resign() async {
+    if (_matchId == null) return;
+    await _apiClient.post(
+      '/match/$_matchId/resign',
+      headers: {'Authorization': 'Bearer ${UserService().token}'},
+    );
+    dispose();
+  }
+
+  void dispose() {
+    _pollingTimer?.cancel();
+    _pollingTimer = null;
+    _matchId = null;
     _playerColor = null;
+    _gameController.close();
   }
 }
